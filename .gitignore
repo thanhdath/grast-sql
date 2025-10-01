@@ -1,0 +1,15 @@
+*.pkl
+finetuned*/
+cache/
+*.json
+qwen-*/
+logs/
+wandb/
+data/
+runs/
+output/
+__pycache__
+*.png
+finetuned-*/
+prompts*/
+results-*/
