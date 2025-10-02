@@ -13,3 +13,5 @@ __pycache__
 finetuned-*/
 prompts*/
 results-*/
+griffith-bigdata/
+models/

@@ -5,41 +5,102 @@ train_with_frozen_embeddings.py  (AUC‑Enhanced + Best ROC/PR Tracking)
 Training script that loads pre‑initialized embeddings and runs graph transformers.
 """
 
-import os
-import pickle
 import random
 import argparse
-import json
 import math
 from pathlib import Path
-from typing import Dict, List, Sequence, Any, Tuple, Optional
+from typing import Dict, List, Any, Optional, Sequence, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from torch.cuda.amp.autocast_mode import autocast
 from torch.cuda.amp.grad_scaler import GradScaler
 from torch.utils.tensorboard.writer import SummaryWriter
 
 from tqdm import tqdm
-import networkx as nx
-from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import TransformerConv
-import io
 
 # Metrics
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc
+
+# Import Graph Reranker components
+from modules.graph_reranker.data import (
+    load_embeddings_and_metadata,
+    create_dataset_from_embeddings,
+)
+from modules.graph_reranker.model import GraphColumnRetrieverFrozen
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 TOP_K_VALUES = (10, 20)
-EDGE_TYPE_MAP = {"foreign_key": 0,
-                 "col_to_foreign_key": 1,
-                 "col_to_primary_key": 1}
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@torch.no_grad()
+def evaluate(loader: DataLoader, model: nn.Module, device: torch.device, top_k: Sequence[int]) -> Tuple[Dict[int, Dict[str, float]], List[float], List[float]]:
+    """Evaluate model performance on a loader.
+
+    Returns
+    -------
+    stats_avg : dict
+        {k: {prec, rec_col, rec_tab}} averaged across samples.
+    all_scores : list of float
+        Concatenated logits for ALL nodes across ALL samples (micro pool).
+    all_labels : list of float
+        Corresponding gold labels (0/1) for each score.
+    """
+    model.eval()
+    stats: Dict[int, Dict[str, List[float]]] = {k: {m: [] for m in ("prec", "rec_col", "rec_tab")} for k in top_k}
+    all_scores: List[float] = []
+    all_labels: List[float] = []
+
+    for data in loader:  # dev loader uses bs=1
+        data = data.to(device)
+        with autocast():
+            logits = model(data)  # (N,)
+        names = data.orig_names[0]
+        truths = [names[i] for i, y in enumerate(data.y) if y == 1]
+        preds_idx = logits.argsort(descending=True)
+        L = logits.size(0)
+
+        # Collect scores/labels for micro AUC
+        all_scores.extend(logits.detach().cpu().tolist())
+        all_labels.extend(data.y.detach().cpu().tolist())
+
+        for k in top_k:
+            k_eff = min(k, L)
+            preds = [names[i] for i in preds_idx[:k_eff]]
+            tp = len(set(preds) & set(truths))
+            stats[k]["prec"].append(tp / k_eff if k_eff else 0)
+            stats[k]["rec_col"].append(tp / len(truths) if truths else 0)
+            stats[k]["rec_tab"].append(
+                len({p.split('.')[0] for p in preds} &
+                    {t.split('.')[0] for t in truths}) /
+                len({t.split('.')[0] for t in truths}) if truths else 0)
+
+    # Average
+    stats_avg: Dict[int, Dict[str, float]] = {k: {m: (sum(v) / len(v) if v else 0.0) for m, v in d.items()} for k, d in stats.items()}
+    return stats_avg, all_scores, all_labels
+
+
+@torch.no_grad()
+def evaluate_average_loss(loader: DataLoader, model: nn.Module, criterion: nn.Module, device: torch.device) -> float:
+    """Compute average loss over a data loader using the provided criterion."""
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    for data in loader:
+        data = data.to(device)
+        with autocast():
+            logits = model(data)
+            if logits.numel() == 0 or logits.size(0) != data.y.size(0):
+                continue
+            loss = criterion(logits, data.y.float())
+        total_loss += loss.item()
+        num_batches += 1
+    return total_loss / max(1, num_batches) 
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -79,213 +140,6 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-def load_embeddings_and_metadata(embeddings_dir: Path, dataset: str, reranker_type: str, split: str):
-    """Load embeddings and metadata from a directory that contains exactly:
-    - one embeddings .pkl file
-    - one metadata*.json file
-
-    The function intentionally ignores dataset/reranker/split naming and
-    simply picks the single matching files, keeping the logic minimal and
-    directory-driven.
-    """
-    assert split in ("train", "dev"), f"Invalid split: {split}"
-
-    # Locate embeddings (.pkl)
-    emb_candidates = list(embeddings_dir.glob("*.pkl"))
-    if len(emb_candidates) != 1:
-        names = ", ".join(p.name for p in emb_candidates) or "<none>"
-        raise FileNotFoundError(
-            f"Expected exactly one .pkl in {embeddings_dir}, found {len(emb_candidates)}: {names}"
-        )
-    emb_path = emb_candidates[0]
-
-    # Locate metadata (metadata*.json)
-    meta_candidates = list(embeddings_dir.glob("metadata*.json"))
-    if len(meta_candidates) != 1:
-        names = ", ".join(p.name for p in meta_candidates) or "<none>"
-        raise FileNotFoundError(
-            f"Expected exactly one metadata*.json in {embeddings_dir}, found {len(meta_candidates)}: {names}"
-        )
-    metadata_path = meta_candidates[0]
-
-    print(f"[INFO] Using embeddings: {emb_path.name}")
-    print(f"[INFO] Using metadata  : {metadata_path.name}")
-
-    # CPU-safe load
-    orig_load_from_bytes = torch.storage._load_from_bytes
-    torch.storage._load_from_bytes = lambda b: torch.load(io.BytesIO(b), map_location='cpu')
-    try:
-        with open(emb_path, 'rb') as f:
-            embeddings = pickle.load(f)
-    except Exception:
-        with open(emb_path, 'rb') as f:
-            embeddings = torch.load(f, map_location=torch.device('cpu'))
-    finally:
-        torch.storage._load_from_bytes = orig_load_from_bytes
-
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-    print(f"Loaded {len(embeddings)} {split} samples")
-    print(f"Embedding dimension: {metadata['embed_dim']}")
-    return embeddings, metadata
-
-
-def graph_to_data_with_embeddings(g: nx.DiGraph, query: str,
-                                 true_cols: Sequence[str],
-                                 embeddings: torch.Tensor) -> Data:
-    """Convert graph to PyTorch Geometric Data with pre‑computed embeddings."""
-    names = sorted(g.nodes())
-    idx = {n: i for i, n in enumerate(names)}
-
-    # Pre‑computed node embeddings (Tensor: [num_nodes, embed_dim])
-    x = embeddings
-
-    labels = torch.tensor([1.0 if n in true_cols else 0.0 for n in names], dtype=torch.float32)
-
-    e_src, e_dst, e_attr = [], [], []
-    for u, v, ed in g.edges(data=True):
-        if u not in idx or v not in idx:
-            continue
-        e_src.append(idx[u])
-        e_dst.append(idx[v])
-        et = EDGE_TYPE_MAP.get(ed.get("edge_type", "foreign_key"), 1)
-        e_attr.append([1.0, 0.0] if et == 0 else [0.0, 1.0])
-
-    if not e_src:  # no edges - create self-edges for all nodes
-        # Create self-edges: each node connects to itself
-        e_src = list(range(len(names)))
-        e_dst = list(range(len(names)))
-        e_attr = [[0.0, 1.0] for _ in range(len(names))]  # Use "other" edge type for self-edges
-        edge_index = torch.tensor([e_src, e_dst], dtype=torch.long)
-        edge_attr = torch.tensor(e_attr, dtype=torch.float32)
-    else:
-        edge_index = torch.tensor([e_src, e_dst], dtype=torch.long)
-        edge_attr = torch.tensor(e_attr, dtype=torch.float32)
-
-    data = Data(x=x, q_raw=query, orig_names=names,
-                y=labels, edge_index=edge_index, edge_attr=edge_attr)
-    data.num_nodes = len(names)
-    return data
-
-
-def create_dataset_from_embeddings(embeddings_dict: Dict[str, Any]) -> List[Data]:
-    """Create dataset from pre‑computed embeddings (new format)."""
-    print(f"Creating dataset from embeddings…")
-    data = []
-    for emb in embeddings_dict.values():
-        q = emb['query']
-        embeddings = emb['embeddings']
-        positives = emb['positives']
-        G = emb['G']
-        # Create Data object
-        data_obj = graph_to_data_with_embeddings(G, q, positives, embeddings)
-        data.append(data_obj)
-    print(f"Created {len(data)} data samples")
-    return data
-
-# ---------------------------------------------------------------------------
-# Model
-# ---------------------------------------------------------------------------
-
-class GraphColumnRetrieverFrozen(nn.Module):
-    def __init__(self, embed_dim: int, hid_dim: int = 1024, num_layers: int = 2, edge_dim: int = 2):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.use_gnn = num_layers > 0
-
-        if self.use_gnn:
-            self.gnn = nn.ModuleList([
-                TransformerConv(in_channels=embed_dim if i == 0 else hid_dim,
-                                out_channels=hid_dim, heads=4, concat=False,
-                                edge_dim=edge_dim, dropout=0.1)
-                for i in range(num_layers)
-            ])
-            proj_in = hid_dim
-        else:
-            proj_in = embed_dim
-
-        self.cls_head = nn.Linear(proj_in, 1)
-
-    def forward(self, data: Batch):
-        x = data.x  # type: ignore[attr-defined]  # Pre‑computed embeddings
-
-        if self.use_gnn and x.size(0):
-            # Always use GNN layers since we now have edges (either real or self-edges)
-            ea = data.edge_attr if data.edge_attr.numel() else None  # type: ignore[attr-defined]
-            for layer in self.gnn:
-                x = F.relu(layer((x, x), data.edge_index, ea))  # type: ignore[attr-defined]
-
-        return self.cls_head(x).squeeze(-1)
-
-# ---------------------------------------------------------------------------
-# Evaluation Helpers
-# ---------------------------------------------------------------------------
-
-@torch.no_grad()
-def evaluate(loader: DataLoader, model: nn.Module) -> Tuple[Dict[int, Dict[str, float]], List[float], List[float]]:
-    """Evaluate model performance on a loader.
-
-    Returns
-    -------
-    stats_avg : dict
-        {k: {prec, rec_col, rec_tab}} averaged across samples.
-    all_scores : list of float
-        Concatenated logits for ALL nodes across ALL samples (micro pool).
-    all_labels : list of float
-        Corresponding gold labels (0/1) for each score.
-    """
-    model.eval()
-    stats = {k: {m: [] for m in ("prec", "rec_col", "rec_tab")} for k in TOP_K_VALUES}
-    all_scores: List[float] = []
-    all_labels: List[float] = []
-
-    for data in loader:  # dev loader uses bs=1
-        data = data.to(DEVICE)
-        with autocast():
-            logits = model(data)  # (N,)
-        names = data.orig_names[0]
-        truths = [names[i] for i, y in enumerate(data.y) if y == 1]
-        preds_idx = logits.argsort(descending=True)
-        L = logits.size(0)
-
-        # Collect scores/labels for micro AUC
-        all_scores.extend(logits.detach().cpu().tolist())
-        all_labels.extend(data.y.detach().cpu().tolist())
-
-        for k in TOP_K_VALUES:
-            k_eff = min(k, L)
-            preds = [names[i] for i in preds_idx[:k_eff]]
-            tp = len(set(preds) & set(truths))
-            stats[k]["prec"].append(tp / k_eff if k_eff else 0)
-            stats[k]["rec_col"].append(tp / len(truths) if truths else 0)
-            stats[k]["rec_tab"].append(
-                len({p.split('.')[0] for p in preds} &
-                    {t.split('.')[0] for t in truths}) /
-                len({t.split('.')[0] for t in truths}) if truths else 0)
-
-    # Average
-    stats_avg = {k: {m: (sum(v) / len(v) if v else 0.0) for m, v in d.items()} for k, d in stats.items()}
-    return stats_avg, all_scores, all_labels
-
-
-@torch.no_grad()
-def evaluate_average_loss(loader: DataLoader, model: nn.Module, criterion: nn.Module) -> float:
-    """Compute average loss over a data loader using the provided criterion."""
-    model.eval()
-    total_loss = 0.0
-    num_batches = 0
-    for data in loader:
-        data = data.to(DEVICE)
-        with autocast():
-            logits = model(data)
-            if logits.numel() == 0 or logits.size(0) != data.y.size(0):
-                continue
-            loss = criterion(logits, data.y.float())
-        total_loss += loss.item()
-        num_batches += 1
-    return total_loss / max(1, num_batches)
 
 # ---------------------------------------------------------------------------
 # Main Training Loop
@@ -396,11 +250,11 @@ def main():
         # Dev evaluation (top‑K + AUC metrics)
         # ------------------------------------------------------------------
         if dev_loader:
-            dev_stats, all_scores, all_labels = evaluate(dev_loader, model)
+            dev_stats, all_scores, all_labels = evaluate(dev_loader, model, DEVICE, TOP_K_VALUES)
             train_avg_loss = total_loss / max(1, len(train_loader))
 
             # Compute dev loss
-            dev_avg_loss = evaluate_average_loss(dev_loader, model, criterion)
+            dev_avg_loss = evaluate_average_loss(dev_loader, model, criterion, DEVICE)
 
             # Micro ROC / PR AUC across all columns (Dev)
             try:
