@@ -94,7 +94,7 @@ class EmbeddingInitializer:
             trust_remote_code=True,
             max_model_len=max_length,  # lets vLLM handle truncation internally
             enable_chunked_prefill=False,  # Avoid issues with pooling + encode
-            # gpu_memory_utilization=0.7,
+            gpu_memory_utilization=0.2,
             tensor_parallel_size=1,
         )
 

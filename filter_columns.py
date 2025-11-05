@@ -28,9 +28,9 @@ import networkx as nx
 from modules.column_encoder.init_embeddings import make_desc, EmbeddingInitializer
 from modules.graph_reranker.data import graph_to_data_with_embeddings
 from modules.graph_reranker.model import GraphColumnRetrieverFrozen
+import modules.steiner_tree_spanner as steiner_tree_spanner
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 def filter_top_k_columns_with_model(
     question: str,
@@ -41,17 +41,10 @@ def filter_top_k_columns_with_model(
     batch_size: int,
     device_str: str,
 ) -> List[Tuple[str, float]]:
-    """Filter top-k columns using GRAST-SQL model."""
+    """Filter top-k columns using GRAST-SQL model with Steiner-tree post-processing."""
     names = sorted(graph.nodes())
     descs = [make_desc(graph.nodes[n]) for n in names]
-    
-    # Generate embeddings on-the-fly
-    embeds_list = []
-    for i in range(0, len(descs), batch_size):
-        batch_descs = descs[i:i + batch_size]
-        batch_embeds = emb_init.encode_pairs([question] * len(batch_descs), [batch_descs])
-        embeds_list.append(batch_embeds)
-    embeds = torch.cat(embeds_list, dim=0)
+    embeds = emb_init.encode_pairs([question] * len(descs), [descs])
     
     # Convert graph to PyTorch Geometric format
     pyg = graph_to_data_with_embeddings(graph, question, [], embeds).to(device_str)
@@ -60,11 +53,9 @@ def filter_top_k_columns_with_model(
     with torch.no_grad(), autocast():
         logits = gnn(pyg)
     
-    # Get scores and sort
-    scores = logits.cpu().numpy()
-    column_scores = [(name, float(score)) for name, score in zip(names, scores)]
-    column_scores.sort(key=lambda x: x[1], reverse=True)
-    return column_scores[:k]
+    # Select using module helper
+    scores = logits.cpu().numpy().tolist()
+    return steiner_tree_spanner.select_top_k_with_steiner(names, scores, graph, k)
 
 
 def main():
