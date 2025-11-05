@@ -79,8 +79,8 @@ def main():
                        default=Path("griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker/layer-3-hidden-2048.pt"),
                        help="Path to GNN checkpoint file")
     parser.add_argument("--encoder-path", type=str,
-                       default="/home/datht/grast-sql/griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker",
-                       help="Path to encoder model (default: /home/datht/grast-sql/griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker)")
+                       default="griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker",
+                       help="Path to encoder model (default: griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker)")
     parser.add_argument("--batch-size", type=int, default=32,
                        help="Batch size for embedding generation (default: 32)")
     parser.add_argument("--max-length", type=int, default=4096,
