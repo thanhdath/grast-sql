@@ -65,9 +65,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-args = parse_args()
-load_dotenv("/home/datht/mats/.env")
-MONGO_URI = args.mongo_uri
 
 
 # ───────────────────────────────────────────────────────────────
@@ -411,6 +408,28 @@ def generate_meaning_with_openai(prompt: str, model: str = "gpt-4.1-mini") -> st
 # 2.  Core logic
 # ───────────────────────────────────────────────────────────────
 
+def generate_column_meanings_for_schema(schema_info: Dict[str, Any], model: str, db_id: str, evidence: str) -> None:
+    """Generate column meanings for a schema_info dict."""
+    for full_col in tqdm(schema_info["schema"], desc="Generating column meanings"):
+        table, col_name = full_col.split(".", 1)
+        col_info = schema_info["column_info"][full_col]
+        col_type = col_info["type"]
+        samples = col_info.get("similar_values", [])
+        
+        prompt = generate_column_prompt(
+            db_id=db_id,
+            table_fullname=table,
+            column_name=col_name,
+            column_type=col_type,
+            column_values=[str(v) for v in samples[:5]],
+            db_type="sqlite",
+            external_knowledge=evidence,
+        )
+        
+        meaning = generate_meaning_with_openai(prompt, model)
+        if meaning:
+            schema_info["column_meaning"][full_col] = meaning
+
 
 def find_columns_without_meaning(doc: Dict[str, Any], filter_columns: Set[str] | None = None) -> List[str]:
     schema: List[str] = doc.get("schema", []) or []
@@ -467,6 +486,10 @@ def find_columns_without_meaning(doc: Dict[str, Any], filter_columns: Set[str] |
 
 
 def main() -> None:
+    args = parse_args()
+    load_dotenv("/home/datht/mats/.env")
+    mongo_uri = args.mongo_uri
+
     # Load filter columns if provided
     filter_columns = None
     if args.filter:
@@ -474,7 +497,7 @@ def main() -> None:
         if not filter_columns:
             print("Warning: No filter columns loaded. Processing all columns.")
     
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(mongo_uri)
     coll = client["mats"][args.collection_name]
 
     # Determine documents to process

@@ -42,17 +42,16 @@ from __future__ import annotations
 import argparse
 import os
 import datetime as dt
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 from pathlib import Path
 import csv
 import re
 from multiprocessing import Pool
 
 from dotenv import load_dotenv
-from pymongo import MongoClient, UpdateMany, errors
+from pymongo import MongoClient, errors
 from openai import OpenAI  # type: ignore
 import tiktoken  # type: ignore
-
 
 # ───────────────────────────── CLI ──────────────────────────────
 
@@ -88,10 +87,6 @@ def parse_args() -> argparse.Namespace:
                    help="Number of worker processes for prompt generation/token estimation (default: %(default)s)")
     return p.parse_args()
 
-
-args = parse_args()
-load_dotenv("/home/datht/mats/.env")
-MONGO_URI = args.mongo_uri
 
 
 # ───────────────────────────── OpenAI ───────────────────────────
@@ -361,8 +356,51 @@ def worker_estimate_group(task: Tuple[Tuple[str, str], Dict[str, Any], Dict[str,
 
 # ───────────────────────────── Main ─────────────────────────────
 
+def generate_table_meanings_for_schema(schema_info: Dict[str, Any], model: str, db_id: str, evidence: str) -> None:
+    """Generate table meanings for a schema_info dict. Assumes column meanings are already generated."""
+    tables = {}
+    for full_col in schema_info["schema"]:
+        table, _ = full_col.split(".", 1)
+        tables.setdefault(table, []).append(full_col)
+    
+    # Generate table meanings
+    for table, cols in tables.items():
+        column_list = []
+        for full_col in cols:
+            col_name = full_col.split(".", 1)[1]
+            col_info = schema_info["column_info"][full_col]
+            col_type = col_info["type"]
+            samples = col_info.get("similar_values", [])
+            col_meaning = schema_info["column_meaning"].get(full_col, f"{col_name} ({col_type})")
+            
+            column_list.append({
+                "name": col_name,
+                "meaning": col_meaning,
+                "values": samples[:3],
+                "type": col_type,
+            })
+        
+        prompt = build_table_prompt(
+            db_id=db_id,
+            table_name=table,
+            columns=column_list,
+            evidence_snippet=evidence,
+            max_values=3,
+        )
+        
+        meaning = call_openai_for_table_meaning(prompt, model)
+        if meaning:
+            meaning = meaning.split(".")[0].strip()
+            if meaning and not meaning.endswith("."):
+                meaning += "."
+            schema_info["table_meaning"][table] = meaning
+
+
 def main() -> None:
-    client = MongoClient(MONGO_URI)
+    args = parse_args()
+    load_dotenv("/home/datht/mats/.env")
+    mongo_uri = args.mongo_uri
+    client = MongoClient(mongo_uri)
     coll = client["mats"][args.collection_name]
 
     # Fetch candidate docs

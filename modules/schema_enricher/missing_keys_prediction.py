@@ -41,14 +41,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from pymongo import MongoClient, UpdateOne, UpdateMany, errors
 
-try:
-    # Prefer new SDK
-    from openai import OpenAI  # type: ignore
-except Exception:  # pragma: no cover - optional dependency resolution
-    OpenAI = None  # type: ignore
 
-# Try to use tiktoken for accurate token counting
-import tiktoken  # type: ignore
+from openai import OpenAI 
+import tiktoken
 
 
 
@@ -73,12 +68,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-args = parse_args()
-load_dotenv("/home/datht/mats/.env")
-MONGO_URI = args.mongo_uri
 
-
-# ───────────────────────────── OpenAI ───────────────────────────
 
 _openai_client: Any = None
 
@@ -337,8 +327,47 @@ def count_tokens_approx(text: str) -> int:
 
 # ───────────────────────────── Main ─────────────────────────────
 
+def predict_missing_keys_for_schema(schema_info: Dict[str, Any], model: str, db_id: str) -> None:
+    """Predict missing primary keys and foreign keys for a schema_info dict."""
+    schema_list: List[str] = sorted(schema_info.get("schema", []))
+    if not schema_list:
+        schema_info["generated_primary_keys"] = {}
+        schema_info["generated_foreign_keys"] = {}
+        return
+    
+    grouped = group_schema_by_table(schema_list)
+    grouped_candidates = filter_grouped_to_key_candidates(grouped)
+    # If no candidates identified, fall back to full grouped schema to avoid empty prompt
+    grouped_for_prompt = grouped_candidates if grouped_candidates else grouped
+    prompt = build_prompt(db_id, grouped_for_prompt)
+    
+    answer = call_openai_for_keys(prompt, model)
+    if not answer:
+        schema_info["generated_primary_keys"] = {}
+        schema_info["generated_foreign_keys"] = {}
+        return
+    
+    try:
+        # Parse using the same candidate set used in the prompt
+        gen_pks, gen_fks = parse_openai_answer_to_structs(answer, grouped_for_prompt)
+    except Exception as e:
+        print(f"[{db_id}]: Failed to parse model output: {e}")
+        schema_info["generated_primary_keys"] = {}
+        schema_info["generated_foreign_keys"] = {}
+        return
+    
+    # Validate generated keys against the schema
+    valid_pks, valid_fks = validate_generated_keys(schema_list, gen_pks, gen_fks)
+    
+    schema_info["generated_primary_keys"] = valid_pks
+    schema_info["generated_foreign_keys"] = valid_fks
+
+
 def main() -> None:
-    client = MongoClient(MONGO_URI)
+    args = parse_args()
+    load_dotenv("/home/datht/mats/.env")
+    mongo_uri = args.mongo_uri
+    client = MongoClient(mongo_uri)
     coll = client["mats"][args.collection_name]
 
     # Build query set
@@ -414,38 +443,41 @@ def main() -> None:
             print(f"[{db_id} | {db_type}]: No schema found, skipping")
             continue
 
-        grouped = group_schema_by_table(schema_list)
-        grouped_candidates = filter_grouped_to_key_candidates(grouped)
-        # If no candidates identified, fall back to full grouped schema to avoid empty prompt
-        grouped_for_prompt = grouped_candidates if grouped_candidates else grouped
-        prompt = build_prompt(db_id, grouped_for_prompt)
-
+        # Build schema_info dict for predict_missing_keys_for_schema
+        schema_info_for_prediction = {
+            "schema": schema_list,
+            "generated_primary_keys": {},
+            "generated_foreign_keys": {},
+        }
+        
         if args.dry_run:
+            grouped = group_schema_by_table(schema_list)
+            grouped_candidates = filter_grouped_to_key_candidates(grouped)
+            grouped_for_prompt = grouped_candidates if grouped_candidates else grouped
+            prompt = build_prompt(db_id, grouped_for_prompt)
             print("\n===== PROMPT =====")
             print(prompt)
-
-        answer = call_openai_for_keys(prompt, args.model)
-        print("\n===== RAW ANSWER =====")
-        print(answer)
-
-        try:
-            # Parse using the same candidate set used in the prompt
-            gen_pks, gen_fks = parse_openai_answer_to_structs(answer, grouped_for_prompt)
-        except Exception as e:
-            print(f"[{db_id} | {db_type}]: Failed to parse model output: {e}")
-            continue
-
-        if args.dry_run:
-            print("\n===== PARSED =====")
-            print(json.dumps({
-                "generated_primary_keys": gen_pks,
-                "generated_foreign_keys": gen_fks,
-            }, indent=2, ensure_ascii=False))
+            
+            answer = call_openai_for_keys(prompt, args.model)
+            print("\n===== RAW ANSWER =====")
+            print(answer)
+            
+            try:
+                gen_pks, gen_fks = parse_openai_answer_to_structs(answer, grouped_for_prompt)
+                print("\n===== PARSED =====")
+                print(json.dumps({
+                    "generated_primary_keys": gen_pks,
+                    "generated_foreign_keys": gen_fks,
+                }, indent=2, ensure_ascii=False))
+            except Exception as e:
+                print(f"[{db_id} | {db_type}]: Failed to parse model output: {e}")
             # Skip DB write in dry-run
             continue
 
-        # Validate generated keys against the union schema for this DB
-        valid_pks, valid_fks = validate_generated_keys(schema_list, gen_pks, gen_fks)
+        # Use the unified function to predict keys
+        predict_missing_keys_for_schema(schema_info_for_prediction, args.model, db_id)
+        valid_pks = schema_info_for_prediction["generated_primary_keys"]
+        valid_fks = schema_info_for_prediction["generated_foreign_keys"]
 
         # Update all documents with this (db_id, db_type) immediately
         try:
@@ -505,7 +537,3 @@ def main() -> None:
 
     client.close()
     print("Done.")
-
-
-if __name__ == "__main__":
-    main() 

@@ -28,3 +28,65 @@ GRAST-SQL is a lightweight, open-source schema-filtering framework that scales T
 - `build_graph.py`: Tools for constructing the functional-dependency (FD) graph
 - `evaluate_on_the_fly.py`: End-to-end evaluation and inference entry point
 - `environment.yaml`: Reproducible environment specification
+
+## Plugging GRAST-SQL on Custom Database
+
+To apply GRAST-SQL to your own database, follow these two simple steps:
+
+### Step 1: Initialize Schema Graph
+
+Extract schema information, generate table/column meanings, predict missing keys, and build the functional dependency graph:
+
+```bash
+python init_schema.py \
+    --db-path /path/to/your/database.sqlite \
+    --output schema_graph.pkl \
+    --model gpt-4.1-mini
+```
+
+**Arguments:**
+- `--db-path`: Path to your SQLite database file (required)
+- `--output`: Output path for the graph pickle file (default: `schema_graph.pkl`)
+- `--model`: OpenAI model to use for meaning generation and key prediction (default: `gpt-4.1-mini`)
+
+**Note:** Make sure your OpenAI API key is set in `.env`.
+
+### Step 2: Filter Top-K Columns
+
+Use the GRAST-SQL model to filter the most relevant columns for a given question:
+
+```bash
+python filter_columns.py \
+    --graph schema_graph.pkl \
+    --question "List all professors and their departments" \
+    --top-k 10
+```
+
+**Arguments:**
+- `--graph`: Path to the graph pickle file from Step 1 (required)
+- `--question`: Natural language question about the database (required)
+- `--top-k`: Number of top columns to retrieve (default: 10)
+- `--checkpoint`: Path to GNN checkpoint (default: `griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker/layer-3-hidden-2048.pt`)
+- `--encoder-path`: Path to encoder model (default: `/home/datht/grast-sql/griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker`)
+- `--max-length`: Maximum sequence length (default: 4096)
+- `--batch-size`: Batch size for embedding generation (default: 32)
+- `--hidden-dim`: Hidden dimension for GNN (default: 2048)
+- `--num-layers`: Number of GNN layers (default: 3)
+
+### Example
+
+```bash
+# Step 1: Initialize schema from a custom database
+python init_schema.py \
+    --db-path /home/datht/mats/data/spider/database/concert_singer/concert_singer.sqlite \
+    --output concert_singer.pkl \
+    --model gpt-4.1-mini
+
+# Step 2: Filter columns for a question
+python filter_columns.py \
+    --graph concert_singer.pkl \
+    --question "Show name, country, age for all singers ordered by age from the oldest to the youngest." \
+    --top-k 5
+```
+
+The output will show the top-k most relevant columns ranked by the GRAST-SQL model, along with their metadata (column, meaning, type, example values).
