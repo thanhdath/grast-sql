@@ -39,8 +39,8 @@ Extract schema information, generate table/column meanings, predict missing keys
 
 ```bash
 python init_schema.py \
-    --db-path /path/to/your/database.sqlite \
-    --output schema_graph.pkl \
+    --db-path /home/datht/mats/data/spider/database/concert_singer/concert_singer.sqlite \
+    --output concert_singer.pkl \
     --model gpt-4.1-mini
 ```
 
@@ -57,9 +57,9 @@ Use the GRAST-SQL model to filter the most relevant columns for a given question
 
 ```bash
 python filter_columns.py \
-    --graph schema_graph.pkl \
-    --question "List all professors and their departments" \
-    --top-k 10
+    --graph concert_singer.pkl \
+    --question "Show name, country, age for all singers ordered by age from the oldest to the youngest." \
+    --top-k 5
 ```
 
 **Arguments:**
@@ -67,26 +67,8 @@ python filter_columns.py \
 - `--question`: Natural language question about the database (required)
 - `--top-k`: Number of top columns to retrieve (default: 10)
 - `--checkpoint`: Path to GNN checkpoint (default: `griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker/layer-3-hidden-2048.pt`)
-- `--encoder-path`: Path to encoder model (default: `/home/datht/grast-sql/griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker`)
+- `--encoder-path`: Path to encoder model (default: `griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker`)
 - `--max-length`: Maximum sequence length (default: 4096)
 - `--batch-size`: Batch size for embedding generation (default: 32)
 - `--hidden-dim`: Hidden dimension for GNN (default: 2048)
 - `--num-layers`: Number of GNN layers (default: 3)
-
-### Example
-
-```bash
-# Step 1: Initialize schema from a custom database
-python init_schema.py \
-    --db-path /home/datht/mats/data/spider/database/concert_singer/concert_singer.sqlite \
-    --output concert_singer.pkl \
-    --model gpt-4.1-mini
-
-# Step 2: Filter columns for a question
-python filter_columns.py \
-    --graph concert_singer.pkl \
-    --question "Show name, country, age for all singers ordered by age from the oldest to the youngest." \
-    --top-k 5
-```
-
-The output will show the top-k most relevant columns ranked by the GRAST-SQL model, along with their metadata (column, meaning, type, example values).
