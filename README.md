@@ -29,6 +29,17 @@ GRAST-SQL is a lightweight, open-source schema-filtering framework that scales T
 - `evaluate_on_the_fly.py`: End-to-end evaluation and inference entry point
 - `environment.yaml`: Reproducible environment specification
 
+## Setup
+
+### Environment Setup
+
+Create a conda environment using the provided environment file:
+
+```bash
+conda env create -n grast-sql --file environment.yaml
+conda activate grast-sql
+```
+
 ## Plugging GRAST-SQL on Custom Database
 
 To apply GRAST-SQL to your own database, follow these two simple steps:
