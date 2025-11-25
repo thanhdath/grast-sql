@@ -17,6 +17,8 @@ from tqdm import tqdm
 import numpy as np
 import importlib
 from vllm import LLM
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Qwen prompt template (match wip_evaluate_qwen_reranker.py)
 QWEN_PREFIX = """<|im_start|>system
@@ -77,26 +79,34 @@ def make_desc(node: Dict[str, Any]) -> str:
 
 
 class EmbeddingInitializer:
-    def __init__(self, model_path: str, batch_size: int, max_length: int, device: str):
+    def __init__(self, model_path: str, batch_size: int, max_length: int):
         self.model_path = model_path
         self.batch_size = batch_size
         self.max_length = max_length
-        # Normalize device string
-        self.device = device if isinstance(device, str) else ("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         print(f"Loading Qwen3-Reranker with vLLM from {model_path}")
         # Initialize a pooling runner and use task-specific APIs (embed)
-        self.vllm = LLM(
-            model=model_path,
-            runner="pooling",
-            dtype="bfloat16",
-            trust_remote_code=True,
-            max_model_len=max_length,  # lets vLLM handle truncation internally
-            enable_chunked_prefill=False,  # Avoid issues with pooling + encode
-            gpu_memory_utilization=0.2,
-            tensor_parallel_size=1,
-        )
+
+        # self.vllm = LLM(
+        #     model=model_path,
+        #     runner="pooling",
+        #     dtype="bfloat16",
+        #     trust_remote_code=True,
+        #     max_model_len=max_length,  # lets vLLM handle truncation internally
+        #     enable_chunked_prefill=False,  # Avoid issues with pooling + encode
+        #     gpu_memory_utilization=0.95,
+        #     tensor_parallel_size=1,
+        # )
+        self.model_name = model_path
+        self.batch_size = batch_size
+        self.max_length = max_length
+
+        # vLLM OpenAI-compatible embeddings endpoint
+        self.base_url = "http://localhost:8000/v1"
+        self.embeddings_url = f"{self.base_url}/embeddings"
+
+        # If you later add auth, put token in env VLLM_API_KEY
+        self.api_key = os.getenv("VLLM_API_KEY", "EMPTY")
 
         # Keep these for formatting the exact same prompt text as before
         self.qwen_instruction = DEFAULT_QWEN_INSTRUCT
@@ -131,25 +141,90 @@ class EmbeddingInitializer:
             raise RuntimeError("Failed to extract embedding vector from vLLM output")
         return np.asarray(candidate, dtype=np.float32)
 
+    # def qwen_last_hidden_states(self, pair_strings: List[str]) -> List[np.ndarray]:
+    #     """
+    #     Returns a pooled hidden state vector per input using vLLM pooling runner.
+    #     Uses the embed API which returns one vector for each input.
+    #     """
+    #     prompts = self._qwen_process_inputs(pair_strings)
+    #     outputs = self.vllm.embed(prompts, use_tqdm=False, truncate_prompt_tokens=self.max_length)
+    #     last_states: List[np.ndarray] = []
+    #     for out in outputs:
+    #         vec = self._vllm_extract_vector(out)
+    #         last_states.append(vec)
+    #     return last_states
+
+    def _call_embeddings_api(self, text: str) -> np.ndarray:
+        """Call embeddings API for a single text string."""
+        payload = {
+            "model": self.model_name,
+            "input": text,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        resp = requests.post(
+            self.embeddings_url,
+            json=payload,
+            headers=headers,
+            timeout=600
+        )
+        # raises if HTTP != 2xx
+        resp.raise_for_status()
+        data = resp.json()
+
+        if "data" not in data or not data["data"]:
+            raise RuntimeError(
+                f"No embedding data received from vLLM server. "
+                f"Raw response: {data}"
+            )
+
+        # Extract the single embedding
+        item = data["data"][0]
+        return np.asarray(item["embedding"], dtype=np.float32)
+
+    def _call_embeddings_api_threaded(self, texts: List[str]) -> List[np.ndarray]:
+        """Call embeddings API for multiple texts concurrently using threading, maintaining order."""
+        def fetch_embedding(idx: int, text: str) -> tuple[int, np.ndarray]:
+            """Fetch a single embedding and return with its index to maintain order."""
+            return idx, self._call_embeddings_api(text)
+        
+        # Use ThreadPoolExecutor to send all requests concurrently
+        results = [None] * len(texts)  # Pre-allocate to maintain order
+        
+        with ThreadPoolExecutor(max_workers=len(texts)) as executor:
+            # Submit all tasks
+            future_to_idx = {executor.submit(fetch_embedding, idx, text): idx 
+                           for idx, text in enumerate(texts)}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_idx):
+                idx, embedding = future.result()
+                results[idx] = embedding
+        
+        return results
+
+    # ---------- high-level helpers used by your code ----------
+
     def qwen_last_hidden_states(self, pair_strings: List[str]) -> List[np.ndarray]:
-        """
-        Returns a pooled hidden state vector per input using vLLM pooling runner.
-        Uses the embed API which returns one vector for each input.
-        """
         prompts = self._qwen_process_inputs(pair_strings)
-        outputs = self.vllm.embed(prompts, use_tqdm=False, truncate_prompt_tokens=self.max_length)
-        last_states: List[np.ndarray] = []
-        for out in outputs:
-            vec = self._vllm_extract_vector(out)
-            last_states.append(vec)
-        return last_states
+        return self._call_embeddings_api_threaded(prompts)
+
+    # def embed_dim(self) -> int:
+    #     pair_str = self._qwen_format_instruction("dummy query", "dummy doc")
+    #     prompt = self._qwen_process_inputs([pair_str])[0]
+    #     (output,) = self.vllm.embed(prompt, use_tqdm=False)
+    #     vec = self._vllm_extract_vector(output)
+    #     return int(vec.shape[-1])
 
     def embed_dim(self) -> int:
         pair_str = self._qwen_format_instruction("dummy query", "dummy doc")
         prompt = self._qwen_process_inputs([pair_str])[0]
-        (output,) = self.vllm.embed(prompt, use_tqdm=False)
-        vec = self._vllm_extract_vector(output)
+        vec = self._call_embeddings_api(prompt)
         return int(vec.shape[-1])
+
 
     def encode_pairs(self, queries: List[str], node_descs_list: List[List[str]]) -> torch.Tensor:
         pairs = [(q, d) for q, descs in zip(queries, node_descs_list) for d in descs]
@@ -200,8 +275,6 @@ def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    device_str = "cuda:0" if torch.cuda.is_available() else "cpu"
-
     model_path = args.model_path
     print(f"Initializing embeddings with Qwen reranker, graphs_pkl={args.graphs_pkl}, model_path={model_path}")
     print(f"Output directory: {args.output_dir}")
@@ -210,7 +283,6 @@ def main():
         model_path=model_path,
         batch_size=args.batch_size,
         max_length=args.max_length,
-        device=device_str,
     )
 
     pkl_path: Path = args.graphs_pkl

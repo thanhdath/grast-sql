@@ -38,12 +38,10 @@ from tqdm import tqdm
 from pymongo import MongoClient
 
 # project-local imports ------------------------------------------------------
-from frozen_encoder_trainer.init_embeddings import EmbeddingInitializer, make_desc
-from frozen_encoder_trainer.train_with_frozen_embeddings import (
-    graph_to_data_with_embeddings,
-    GraphColumnRetrieverFrozen,
-    DEVICE,
-)
+from modules.column_encoder.init_embeddings import EmbeddingInitializer, make_desc
+from modules.graph_reranker.model import GraphColumnRetrieverFrozen
+from modules.graph_reranker.data import graph_to_data_with_embeddings
+from train_and_evaluate.train_with_frozen_embeddings import DEVICE
 
 DB_NAME = "mats"                             # ← same DB name as exporter
 COLL_TEMPLATE = {                            # (dataset, split) → collection
@@ -81,7 +79,7 @@ def cli() -> argparse.Namespace:
     # evaluation options ----------------------------------------------
     p.add_argument("--evaluation_mode", choices=["end2end", "encoder_only"], default="end2end",
                    help="end2end: current flow with graph transformers; encoder_only: encoder + steiner tree with threshold")
-    p.add_argument("--k",             nargs="+", type=int, default=[10, 20],
+    p.add_argument("--k",             nargs="+", type=int, default=None,
                    help="Fixed top-k values (e.g., 10, 20, 50, 100)")
     p.add_argument("--k_percent",     nargs="+", type=float, default=None,
                    help="Percentage-based top-k values (e.g., 10.0, 15.0, 20.0 for 10%, 15%, 20%)")
@@ -92,13 +90,13 @@ def cli() -> argparse.Namespace:
 
     # misc -------------------------------------------------------------
     p.add_argument("--mongo_uri",     type=str,
-                   default="mongodb://192.168.1.108:27017",
+                   default="mongodb://localhost:27017",
                    help="Mongo URI for reading sample metadata")
     p.add_argument("--log_dir",       type=Path, default=Path("logs/on_the_fly_eval"),
                    help="Directory to save all log files and plots")
     # prediction-write Mongo ------------------------------------------
     p.add_argument("--pred_mongo_uri", type=str,
-                   default="mongodb://192.168.1.108:27017",
+                   default="mongodb://localhost:27017",
                    help="Mongo URI to store predictions")
     p.add_argument("--pred_collection", type=str,
                    default="grast",
@@ -318,12 +316,9 @@ def main() -> None:
     emb_init = None
     if not pre_embeddings:
         emb_init = EmbeddingInitializer(
-            reranker_type=args.reranker_type,
-            model_path   =args.encoder_path or default_enc,
-            cut_layer    =args.cut_layer if args.reranker_type == "layerwise" else None,
-            batch_size   =args.batch_size,
-            max_length   =args.max_length,
-            device       ="cuda:0" if torch.cuda.is_available() else "cpu",
+            model_path=args.encoder_path or default_enc,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
         )
         print("✓ Using on-the-fly embedding generation")
     else:
@@ -450,10 +445,12 @@ def main() -> None:
     
     use_thr = args.threshold is not None
     
-    # Process fixed k values
-    fixed_ks = sorted(args.k) if not use_thr else []
+    # Process fixed k values (only if k_percent is not provided)
+    fixed_ks = []
+    if args.k is not None and args.k_percent is None and not use_thr:
+        fixed_ks = sorted(args.k)
     
-    # Process percentage-based k values
+    # Process percentage-based k values (preferred over fixed k)
     percent_ks = []
     if args.k_percent is not None and not use_thr:
         percent_ks = sorted(args.k_percent)
@@ -654,9 +651,9 @@ def main() -> None:
             if args.exclude_foreign_keys:
                 p_st, r_st = pr_exclude_fk(st_nodes, gold_cols, G)
             else:
-                # Use pr_at_k to ensure consistency with raw calculation
-                # For threshold mode, use the same number of predictions as the raw calculation
-                p_st, r_st = pr_at_k(st_nodes, gold_cols, len(preds_thr))
+                # Evaluate on full Steiner tree (includes all terminals plus connectivity nodes)
+                # The Steiner tree is designed to add connectivity, so we evaluate all nodes
+                p_st, r_st = pr(st_nodes, gold_cols)
 
             thr_raw_p.append(p_raw); thr_raw_r.append(r_raw)
             thr_st_p.append(p_st);  thr_st_r.append(r_st)
@@ -671,7 +668,8 @@ def main() -> None:
                         "description": descs[i],
                         "score": float(scores_np[i]),
                         "is_gold": name in gold_cols,
-                        "is_predicted": name in preds_thr
+                        "is_predicted": name in preds_thr,
+                        "is_in_steiner_tree": name in st_nodes
                     })
                 
                 low_recall_samples.append({
@@ -682,12 +680,13 @@ def main() -> None:
                             "ground_truth_columns_unique": list(dict.fromkeys(gold_cols)),  # De-duplicated version
                             "ground_truth_sql": sql_map.get(sample_id, ""),
                             "predicted_columns": preds_thr,
+                            "steiner_tree_columns": list(st_nodes),
                             "recall": r_raw,
                             "precision": p_raw,
                             "threshold": args.threshold,
                             "evaluation_mode": args.evaluation_mode,
                             "exclude_foreign_keys": args.exclude_foreign_keys,
-                            "missing_columns": get_missing_columns(preds_thr, gold_cols),
+                            "missing_columns": get_missing_columns(st_nodes, gold_cols),
                             "column_details": column_details
                         })
         else:
@@ -697,8 +696,9 @@ def main() -> None:
                     # Handle percentage-based k values
                     if isinstance(k, str) and k.endswith('%'):
                         # Calculate k based on percentage of total columns
+                        # Custom formula: top_k = max(30, k_percent * n_cols)
                         percent = float(k[:-1]) / 100.0
-                        actual_k = max(1, int(len(names) * percent))
+                        actual_k = max(30, int(len(names) * percent))
                     else:
                         # Fixed k value
                         actual_k = int(k)
@@ -713,14 +713,12 @@ def main() -> None:
 
                     st_nodes = list(get_steiner_subgraph(G, preds_all[:actual_k]).nodes())
                     
-
-                    
                     if args.exclude_foreign_keys:
                         p_st, r_st = pr_exclude_fk(st_nodes, gold_cols, G)
                     else:
-                        # Use pr_at_k to ensure consistency with raw calculation
-                        # This ensures we use the same number of predictions as the raw calculation
-                        p_st, r_st = pr_at_k(st_nodes, gold_cols, actual_k)
+                        # Evaluate on full Steiner tree (all terminals plus connectivity nodes)
+                        # The Steiner tree is designed to add connectivity, so we evaluate all nodes
+                        p_st, r_st = pr(st_nodes, gold_cols)
                     
                     stats_st[k]["cp"].append(p_st)
                     stats_st[k]["cr"].append(r_st)
@@ -735,7 +733,8 @@ def main() -> None:
                                 "description": descs[i],
                                 "score": float(scores_np[i]),
                                 "is_gold": name in gold_cols,
-                                "is_predicted": name in preds_all[:actual_k]
+                                "is_predicted": name in preds_all[:actual_k],
+                                "is_in_steiner_tree": name in st_nodes
                             })
                         
                         low_recall_samples.append({
@@ -746,6 +745,7 @@ def main() -> None:
                             "ground_truth_columns_unique": list(dict.fromkeys(gold_cols)),  # De-duplicated version
                             "ground_truth_sql": sql_map.get(sample_id, ""),
                             "predicted_columns": preds_all[:actual_k],
+                            "steiner_tree_columns": list(st_nodes),
                             "recall": cr,
                             "precision": cp,
                             "k": k,
@@ -753,7 +753,7 @@ def main() -> None:
                             "total_columns": len(names),
                             "evaluation_mode": args.evaluation_mode,
                             "exclude_foreign_keys": args.exclude_foreign_keys,
-                            "missing_columns": get_missing_columns(preds_all[:actual_k], gold_cols),
+                            "missing_columns": get_missing_columns(st_nodes, gold_cols),
                             "column_details": column_details
                         })
 

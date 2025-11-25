@@ -13,8 +13,7 @@ Usage:
         --graph schema_graph.pkl \
         --question "List all products with their prices" \
         --top-k 10 \
-        --checkpoint /path/to/checkpoint.pt \
-        --embeddings-dir /path/to/embeddings/
+        --checkpoint /path/to/checkpoint.pt
 """
 
 import argparse
