@@ -12,7 +12,7 @@ GRAST-SQL is a lightweight, open-source schema-filtering framework that scales T
 - **GRAST-SQL 4B**: [GRAST-SQL 4B BIRD](https://huggingface.co/griffith-bigdata/GRAST-SQL-4B-BIRD-Reranker)
 - **GRAST-SQL 8B**: [GRAST-SQL 8B BIRD](https://huggingface.co/griffith-bigdata/GRAST-SQL-8B-BIRD-Reranker)
 
-More models can be found in [Huggingface collection] (https://huggingface.co/collections/griffith-bigdata/grast-sql)
+More models can be found in [Huggingface collection](https://huggingface.co/collections/griffith-bigdata/grast-sql)
 
 > Note: Models trained on BIRD also apply to Spider-2.0-lite, since Spider-2.0 does not include a training set.
 
