@@ -107,7 +107,7 @@ python -u evaluate_on_the_fly.py \
   --hidden_dim 2048 \
   --num_layers 3 \
   --encoder_path griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker \
-  --checkpoint griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker/best-bird-dev-roc-auc-layer-3-hidden-2048.pt \
+  --checkpoint griffith-bigdata/GRAST-SQL-0.6B-BIRD-Reranker/layer-3-hidden-2048.pt \
   --pkl_path data/bird_dev_samples_graph.pkl \
   --k 30 \
   --batch_size 128 \
