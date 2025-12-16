@@ -1,5 +1,7 @@
 ## GRAST-SQL: Implementation of "Scaling Text-to-SQL via LLM-efficient Schema Filtering with Functional Dependency Graph Rerankers"
 
+![visitors](https://visitor-badge.laobi.icu/badge?page_id=thanhdath.grast-sql)
+
 GRAST-SQL is a lightweight, open-source schema-filtering framework that scales Text-to-SQL to real-world, very wide schemas by compacting prompts without sacrificing accuracy. It ranks columns with a query-aware LLM encoder enriched by values/metadata, reranks them via a graph transformer over a functional-dependency (FD) graph to capture inter-column structure, and then guarantees joinability with a Steiner-tree spanner to produce a small, connected sub-schema. Across Spider, BIRD, and Spider-2.0-lite, GRAST-SQL delivers near-perfect recall with substantially higher precision than CodeS, SchemaExP, Qwen rerankers, and embedding retrievers, maintains sub-second median latency on typical databases, scales to 23K+ columns, and cuts prompt tokens by up to 50% in end-to-end systems—often with slight accuracy gains—all while using compact models. This repository provides the trained models, code, and datasets to reproduce results and apply GRAST-SQL to your own databases.
 
 ### Datasets
@@ -174,3 +176,10 @@ python filter_columns.py \
 - `--batch-size`: Batch size for embedding generation (default: 32)
 - `--hidden-dim`: Hidden dimension for GNN (default: 2048)
 - `--num-layers`: Number of GNN layers (default: 3)
+
+
+-----------
+**Backup Statistics**
+
+![Visitors](https://margherita-gustatory-zane.ngrok-free.dev/badge/thanhdath%2Fgrast-sql.svg?ngrok-skip-browser-warning=true)
+
