@@ -137,7 +137,7 @@ python -u evaluate_on_the_fly.py \
 
 To apply GRAST-SQL to your own database, follow these two simple steps:
 
-### Step 1: Initialize - Functional Dependency Graph Construction & Metadata Completion
+### Step 1: Initialize (ONE-TIME per database) - Functional Dependency Graph Construction & Metadata Completion
 
 Extract schema information, generate table/column meanings, predict missing keys, and build the functional dependency graph:
 
