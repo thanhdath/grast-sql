@@ -1,4 +1,4 @@
-## GRAST-SQL: Implementation of "Scaling Text-to-SQL via LLM-efficient Schema Filtering with Functional Dependency Graph Rerankers"
+## GRAST-SQL: Scaling Text-to-SQL via LLM-efficient Schema Filtering with Functional Dependency Graph Rerankers
 
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=thanhdath.grast-sql)
 
@@ -177,6 +177,19 @@ python filter_columns.py \
 - `--hidden-dim`: Hidden dimension for GNN (default: 2048)
 - `--num-layers`: Number of GNN layers (default: 3)
 
+
+## Citation:
+```
+@misc{hoang2025scalingtext2sqlllmefficientschema,
+      title={Scaling Text2SQL via LLM-efficient Schema Filtering with Functional Dependency Graph Rerankers}, 
+      author={Thanh Dat Hoang and Thanh Tam Nguyen and Thanh Trung Huynh and Hongzhi Yin and Quoc Viet Hung Nguyen},
+      year={2025},
+      eprint={2512.16083},
+      archivePrefix={arXiv},
+      primaryClass={cs.DB},
+      url={https://arxiv.org/abs/2512.16083}, 
+}
+```
 
 -----------
 **Backup Statistics**
