@@ -182,14 +182,11 @@ python filter_columns.py \
 
 ## Citation:
 ```
-@misc{hoang2025scalingtext2sqlllmefficientschema,
-      title={Scaling Text2SQL via LLM-efficient Schema Filtering with Functional Dependency Graph Rerankers}, 
-      author={Thanh Dat Hoang and Thanh Tam Nguyen and Thanh Trung Huynh and Hongzhi Yin and Quoc Viet Hung Nguyen},
-      year={2025},
-      eprint={2512.16083},
-      archivePrefix={arXiv},
-      primaryClass={cs.DB},
-      url={https://arxiv.org/abs/2512.16083}, 
+@article{hoang2025scaling,
+  title={Scaling Text2SQL via LLM-efficient Schema Filtering with Functional Dependency Graph Rerankers},
+  author={Hoang, Thanh Dat and Nguyen, Thanh Tam and Huynh, Thanh Trung and Yin, Hongzhi and Nguyen, Quoc Viet Hung},
+  journal={arXiv preprint arXiv:2512.16083},
+  year={2025}
 }
 ```
 
