@@ -1,29 +1,55 @@
-from typing import List, Tuple
+from typing import List, Tuple, Set
 import networkx as nx
 from networkx.algorithms.approximation import steiner_tree
 
 
-def get_steiner_subgraph(G: nx.Graph, terminals: List[str]) -> nx.Graph:
-    """Build a Steiner forest on the undirected version of G, per connected component.
+def _table_of(name: str) -> str:
+    """`table.column` -> `table` (handles column names that contain dots defensively)."""
+    return name.rsplit(".", 1)[0]
 
-    - Works even when terminals span multiple connected components by returning a forest
-      composed of per-component Steiner trees.
-    - Copies node attributes for single-terminal components so downstream code can access
-      metadata on those nodes (e.g., for printing column details).
+
+def table_join_keys(G_u: nx.Graph, selected_tables: Set[str]) -> Set[str]:
+    """Cross-table FK join-key columns needed to connect the *distinct* selected tables.
+    """
+    if len(selected_tables) < 2:
+        return set()
+    # one representative cross-table FK edge per table pair
+    cross = {}
+    for u, w in G_u.edges():
+        tu, tw = _table_of(u), _table_of(w)
+        if tu != tw:
+            cross.setdefault(frozenset((tu, tw)), (u, w))
+    GT = nx.Graph()
+    for pair, (cu, cw) in cross.items():
+        a, b = tuple(pair)
+        GT.add_edge(a, b, cols=(cu, cw))
+    add: Set[str] = set()
+    for comp in nx.connected_components(GT):
+        comp_tables = selected_tables & comp
+        if len(comp_tables) >= 2:
+            try:
+                st = steiner_tree(GT.subgraph(comp).copy(), list(comp_tables))
+                for a, b in st.edges():
+                    cu, cw = GT[a][b]["cols"]
+                    add.add(cu)
+                    add.add(cw)
+            except Exception:
+                pass
+    return add
+
+
+def get_steiner_subgraph(G: nx.Graph, terminals: List[str]) -> nx.Graph:
+    """Steiner closure that guarantees joinability of a selected column set.
     """
     G_u = G.to_undirected()
+    terms = [t for t in terminals if t in G_u]
     forest = nx.Graph()
-    terms = set(terminals)
-    for comp in nx.connected_components(G_u):
-        comp_terms = terms & comp
-        if not comp_terms:
-            continue
-        sub = G_u.subgraph(comp).copy()
-        if len(comp_terms) == 1:
-            node = next(iter(comp_terms))
-            forest.add_node(node, **G.nodes[node])
-        else:
-            forest = nx.compose(forest, steiner_tree(sub, comp_terms))
+    for n in terms:
+        forest.add_node(n, **G.nodes[n])
+    selected_tables = {_table_of(n) for n in terms}
+    for c in table_join_keys(G_u, selected_tables):
+        if c in G_u and c not in forest:
+            forest.add_node(c, **(G.nodes[c] if c in G.nodes else {}))
     return forest
 
 
@@ -56,5 +82,3 @@ def select_top_k_with_steiner(
             if len(result) >= k:
                 break
     return [(n, name_to_score[n]) for n in result[:k]]
-
-

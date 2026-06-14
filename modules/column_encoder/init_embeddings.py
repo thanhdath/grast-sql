@@ -55,27 +55,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def make_desc(node: Dict[str, Any]) -> str:
-    """Create description string for a node."""
+def make_desc(node: Dict[str, Any], max_chars_for_values: int = 2000,
+              ablation_mode: str = "full") -> str:
+    """column context construction: table . col - table meaning - column meaning - type - description - sample values"""
     col = node.get("node_name", "")
-    # meaning = concat(table_meaning, column_meaning)
     table_meaning = node.get("table_meaning", "")
     column_meaning = node.get("meaning", "")
-    meaning = f"Table meaning: {table_meaning} ; Column meaning: {column_meaning}"
     col_type = node.get("type", "")
-    vals = " , ".join(list(map(str, node.get("similar_values", [])))[:2])
+    _val_k = int(os.environ.get("GRAST_VALUE_K", "5"))
+    _sv = node.get("sample_values", node.get("similar_values", [])) or []
+    vals = " , ".join(list(map(str, _sv))[:_val_k])
+    if len(vals) > max_chars_for_values:
+        vals = vals[:max_chars_for_values] + "..."
     has_null = node.get("has_null", False)
     val_desc = node.get("value_desc", "")
-    # Split by dots: first element is table, rest is column
+
     elms = col.split(".")
     table = elms[0]
-    column = ".".join(elms[1:])  # Join the rest back together
-    parts = [f"{table}.{column}", meaning,
-             f"type {col_type}", f"has values {vals}",
-             f"has_null = {has_null}"]
-    if val_desc.strip():
-        parts.append(f"Value description: {val_desc.strip()}")
-    return " ; ".join(parts)
+    column = ".".join(elms[1:])
+
+    identifier = f"{table}.{column}"
+    meaning = f"Table meaning: {table_meaning} ; Column meaning: {column_meaning}"
+
+    parts = [identifier, meaning]
+    parts.append(f"type {col_type}")
+    parts.append(f"has values {vals}")
+    parts.append(f"has_null = {has_null}")
+    parts.append(f"Value description: {val_desc.strip()}")
+
+    desc = " ; ".join(parts)
+    return desc
 
 
 class EmbeddingInitializer:
