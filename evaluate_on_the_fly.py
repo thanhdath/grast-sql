@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""
-evaluate_on_the_fly_embeddings.py
-────────────────────────────────
-Embed each (query, column) pair on-the-fly, run the frozen-encoder GNN, and
-evaluate either top-k or threshold-based precision / recall.
-
-Updated 2025-07-23
-──────────────────
-• Inserts per-sample prediction **and** ground-truth columns into
-  MongoDB → mats.grast (host 192.168.1.108:27027).
-
-Updated 2025-01-XX
-──────────────────
-• Added --evaluation_mode option:
-  - end2end: current flow with graph transformers (default)
-  - encoder_only: encoder + steiner tree with threshold (no graph transformers)
-"""
 
 from __future__ import annotations
 import warnings
@@ -41,6 +23,7 @@ from pymongo import MongoClient
 from modules.column_encoder.init_embeddings import EmbeddingInitializer, make_desc
 from modules.graph_reranker.model import GraphColumnRetrieverFrozen
 from modules.graph_reranker.data import graph_to_data_with_embeddings
+from modules.steiner_tree_spanner import get_steiner_subgraph
 from train_and_evaluate.train_with_frozen_embeddings import DEVICE
 
 DB_NAME = "mats"                             # ← same DB name as exporter
@@ -74,8 +57,16 @@ def cli() -> argparse.Namespace:
     p.add_argument("--batch_size",    type=int, default=32)
     p.add_argument("--max_length",    type=int, default=512)
     # GNN options ----------------------------------------------------\--
-    p.add_argument("--hidden_dim",    type=int, default=1024)
+    p.add_argument("--hidden_dim",    type=int, default=2048)
     p.add_argument("--num_layers",    type=int, default=3)
+    # Step 1 — Stage-I coarse retrieval -------------------------------
+    p.add_argument("--top_m", type=int, default=None,
+                   help="Stage-I coarse retrieval: keep the top-M candidate columns per query "
+                        "(bi-encoder) before the question-aware encoder + GNN + Steiner. "
+                        "Omit to run on the full input schema (Spider/BIRD fit; needed for Spider 2.0).")
+    p.add_argument("--retriever_path", type=str, default=None,
+                   help="Stage-I bi-encoder (sentence-transformers) model path for coarse retrieval.")
+    p.add_argument("--retriever_max_length", type=int, default=512)
     # evaluation options ----------------------------------------------
     p.add_argument("--evaluation_mode", choices=["end2end", "encoder_only"], default="end2end",
                    help="end2end: current flow with graph transformers; encoder_only: encoder + steiner tree with threshold")
@@ -104,23 +95,6 @@ def cli() -> argparse.Namespace:
     return p.parse_args()
 
 # ───────────────── helpers ─────────────────
-def get_steiner_subgraph(G: nx.Graph, terminals: Sequence[str]) -> nx.Graph:
-    G_u = G.to_undirected()
-    forest = nx.Graph()
-    terms = set(terminals)
-    for comp in nx.connected_components(G_u):
-        comp_terms = terms & comp
-        if not comp_terms:
-            continue
-        sub = G_u.subgraph(comp).copy()
-        if len(comp_terms) == 1:
-            node = next(iter(comp_terms))
-            forest.add_node(node, **G.nodes[node])
-        else:
-            forest = nx.compose(forest, steiner_tree(sub, comp_terms))
-    return forest
-
-
 def pr(preds: Sequence[str], gold: Sequence[str]) -> Tuple[float, float]:
     # De-duplicate gold columns before computing precision/recall
     gold_unique = list(dict.fromkeys(gold))  # Preserve order while removing duplicates
@@ -428,6 +402,14 @@ def main() -> None:
         print("✓ Encoder-only mode: skipping GNN loading")
         device_str = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+    # 3b) Step-1 Stage-I coarse retriever (bi-encoder), optional --------
+    retriever = None
+    if args.top_m and args.retriever_path:
+        from modules.embedding import CoarseRetriever
+        retriever = CoarseRetriever(args.retriever_path, device=device_str,
+                                    max_seq_length=args.retriever_max_length)
+        print(f"✓ Stage-I coarse retriever loaded (top_m={args.top_m})")
+
     # 4) containers -----------------------------------------------------
     # Validate arguments based on evaluation mode
     if args.evaluation_mode == "end2end":
@@ -482,6 +464,11 @@ def main() -> None:
     # 5) iterate samples ------------------------------------------------
     for q, G, gold_cols, sample_id in tqdm(triples, desc="Samples"):
         db_id = id2db.get(sample_id, "unknown")
+
+        # Step 1 — Stage-I coarse retrieval: restrict the schema to the top-M candidate columns.
+        if retriever is not None and args.top_m and G.number_of_nodes() > args.top_m:
+            top_names, _ = retriever.retrieve(G, q, args.top_m)
+            G = G.subgraph(top_names).copy()
 
         names = sorted(G.nodes())
         descs = [make_desc(G.nodes[n]) for n in names]

@@ -178,7 +178,7 @@ def main():
     model = GraphColumnRetrieverFrozen(
         embed_dim=train_metadata['embed_dim'],
         hid_dim=args.hid_dim,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
     ).to(DEVICE)
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
