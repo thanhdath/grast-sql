@@ -5,16 +5,22 @@
 GRAST-SL is a **lightweight schema-filtering framework** that scales Text-to-SQL to very wide schemas by removing irrelevant columns while preserving join connectivity. It's a **scoring-based** method, able to set threshold to keep high recall, can scale to large databases like Spider 2.0 Snow. This schema linking system aims to **reduce tables, columns -> reduce prompt tokens** to prompt Text-to-SQL LLM in large databases.
 
 **[14-06-2026] V2**: Coming.
-
 - Better P under high recall for Spider 2.0 Snow, BIRD and Spider.
 - Lower latency compared to V1 by adding a coarse embedding retriever.
-- Enhance GNN structural with global attention over MxM column embeddings. 
-- Enhance Steiner Tree Spanner.
+- Enhance GNN structure with global attention over MxM column embeddings. 
+- Enhance Steiner Tree Spanner compared to V1.
 - 1 model (total parameters 0.8B) works for all three dataset Spider, BIRD, Spider 2.0 Snow.
+
+**V2 data:**
+* [Training set](https://huggingface.co/datasets/griffith-bigdata/GRAST-SL-training-set) — 43K rows: Spider + BIRD train + SQL-GEN-style synthetic over public BigQuery/Snowflake schemas, with seed databases and non-leakage verification vs Spider 2.0.
+* [Evaluation set](https://huggingface.co/datasets/griffith-bigdata/GRAST-SL-evaluation-set) — gold columns for Spider dev (1,034), BIRD dev (1,534), Spider 2.0-lite/-Snow (256), plus case-by-case comparison with prior gold labels by lexical extraction.
+
+
+---
 
 **V1 Pre-print**: [![arXiv](https://img.shields.io/badge/arXiv-2512.16083-b31b1b.svg)](https://arxiv.org/abs/2512.16083)
 
----
+
 
 # ⬇️ V1
 
